@@ -52,7 +52,9 @@ const notifyAdmins = (text, options = {}) => {
   adminIds.forEach((id) => {
     bot
       .sendMessage(id, text, options)
-      .catch((err) => console.error(`Ошибка:`, err.message));
+      .catch((err) =>
+        console.error(`Ошибка отправки админу ${id}:`, err.message),
+      );
   });
 };
 
@@ -64,7 +66,6 @@ bot.onText(/\/start/, (msg) => {
 
   delete adminStates[chatId];
 
-  // Создаем постоянную кнопку внизу экрана
   const mainKeyboard = {
     reply_markup: {
       keyboard: [[{ text: "🎟 Управлять промокодами" }]],
@@ -132,9 +133,8 @@ bot.on("message", (msg) => {
   const text = msg.text;
   if (!adminIds.includes(chatId) || !text || text.startsWith("/")) return;
 
-  // Если нажали на постоянную кнопку внизу
   if (text === "🎟 Управлять промокодами") {
-    delete adminStates[chatId]; // Сбрасываем другие действия, если были
+    delete adminStates[chatId];
     const opts = {
       reply_markup: {
         inline_keyboard: [
@@ -205,8 +205,23 @@ bot.on("message", (msg) => {
 // --- API: Бесплатная консультация ---
 app.post("/api/consultation", (req, res) => {
   const { name, telegram } = req.body;
-  const text = `🔥 <b>Новая заявка на консультацию!</b>\n\nИмя: ${name}\nTelegram: @${telegram.replace("@", "")}`;
-  notifyAdmins(text, { parse_mode: "HTML" });
+
+  // Очищаем никнейм от лишних пробелов и символа @
+  const cleanTg = telegram.replace("@", "").trim();
+
+  const text = `🔥 <b>Новая заявка на консультацию!</b>\n\nИмя: ${name}\nTelegram: @${cleanTg}`;
+
+  // Формируем кнопку для быстрой связи
+  const options = {
+    parse_mode: "HTML",
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "💬 Написать клиенту", url: `https://t.me/${cleanTg}` }],
+      ],
+    },
+  };
+
+  notifyAdmins(text, options);
   res.json({ success: true });
 });
 
@@ -229,9 +244,7 @@ app.post("/api/check-promo", (req, res) => {
 
 // --- API: Создание платежа ---
 app.post("/api/checkout", (req, res) => {
-  // Мы больше НЕ берем originalPrice с фронтенда
   const { name, contact, promo, serviceTitle } = req.body;
-
   const realPrice = SERVICES_PRICES[serviceTitle];
 
   if (!realPrice) {
@@ -278,7 +291,7 @@ app.post("/api/checkout", (req, res) => {
   res.json({ success: true, url: paymentUrl, isPromoValid });
 });
 
-// --- API: Result URL ---
+// --- API: Result URL (Успешная оплата) ---
 app.post("/api/payment/result", (req, res) => {
   const { OutSum, InvId, SignatureValue } = req.body;
   const pass2 = process.env.ROBOKASSA_PASS2;
@@ -291,7 +304,28 @@ app.post("/api/payment/result", (req, res) => {
     if (order && order.status !== "paid") {
       order.status = "paid";
       const text = `💰 <b>УСПЕШНАЯ ОПЛАТА!</b>\n\nУслуга: ${order.serviceTitle}\nСумма: ${OutSum} руб.\nКлиент: ${order.name}\nКонтакт: ${order.contact}`;
-      notifyAdmins(text, { parse_mode: "HTML" });
+
+      // Определяем, что оставил клиент: Email или Telegram
+      let contactUrl = "";
+      const cleanContact = order.contact.trim();
+
+      if (cleanContact.includes("@") && cleanContact.includes(".")) {
+        // Если есть @ и точка - скорее всего это email
+        contactUrl = `mailto:${cleanContact}`;
+      } else {
+        // Иначе это ник в телеграме
+        contactUrl = `https://t.me/${cleanContact.replace("@", "")}`;
+      }
+
+      // Добавляем кнопку
+      const options = {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [[{ text: "💬 Написать клиенту", url: contactUrl }]],
+        },
+      };
+
+      notifyAdmins(text, options);
     }
     res.send(`OK${InvId}`);
   } else {
