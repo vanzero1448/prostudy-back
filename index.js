@@ -12,7 +12,7 @@ app.use(express.urlencoded({ extended: true }));
 // --- Инициализация Телеграм Бота ---
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 const adminIds = process.env.ADMIN_CHAT_IDS
-  ? process.env.ADMIN_CHAT_IDS.split(",")
+  ? process.env.ADMIN_CHAT_IDS.split(",").map((id) => id.trim())
   : [];
 
 // --- База данных (в памяти) ---
