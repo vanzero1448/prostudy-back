@@ -1,0 +1,273 @@
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const md5 = require("md5");
+const TelegramBot = require("node-telegram-bot-api");
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// --- Инициализация Телеграм Бота ---
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+const adminIds = process.env.ADMIN_CHAT_IDS
+  ? process.env.ADMIN_CHAT_IDS.split(",")
+  : [];
+
+// --- База данных (в памяти) ---
+const db = {
+  promocodes: [
+    { code: "IVY2026", type: "percent", value: 10 },
+    { code: "GIFT5000", type: "fixed", value: 5000 },
+  ],
+  orders: [],
+};
+
+const adminStates = {};
+
+const notifyAdmins = (text, options = {}) => {
+  adminIds.forEach((id) => {
+    bot
+      .sendMessage(id, text, options)
+      .catch((err) => console.error(`Ошибка:`, err.message));
+  });
+};
+
+// --- Главное меню бота ---
+bot.onText(/\/start/, (msg) => {
+  const chatId = msg.chat.id.toString();
+  if (!adminIds.includes(chatId))
+    return bot.sendMessage(chatId, "Нет доступа.");
+
+  delete adminStates[chatId];
+
+  // Создаем постоянную кнопку внизу экрана
+  const mainKeyboard = {
+    reply_markup: {
+      keyboard: [[{ text: "🎟 Управлять промокодами" }]],
+      resize_keyboard: true,
+    },
+  };
+
+  bot.sendMessage(
+    chatId,
+    "👋 Привет! Я бот управления ProStudy.\nИспользуй кнопку внизу для управления промокодами.",
+    mainKeyboard,
+  );
+});
+
+// --- Обработка кнопок бота (Inline) ---
+bot.on("callback_query", (query) => {
+  const chatId = query.message.chat.id.toString();
+  if (!adminIds.includes(chatId)) return;
+  const data = query.data;
+
+  if (data === "promo_list") {
+    if (db.promocodes.length === 0)
+      return bot.sendMessage(chatId, "Промокодов пока нет.");
+    const list = db.promocodes
+      .map(
+        (p) =>
+          `▫️ <b>${p.code}</b> — скидка ${p.value}${p.type === "percent" ? "%" : " ₽"}`,
+      )
+      .join("\n");
+    bot.sendMessage(chatId, `🎟 <b>Активные промокоды:</b>\n\n${list}`, {
+      parse_mode: "HTML",
+    });
+  }
+
+  if (data === "promo_add_percent") {
+    adminStates[chatId] = { action: "adding_percent" };
+    bot.sendMessage(
+      chatId,
+      "Отправьте мне <b>КОД</b> и <b>ПРОЦЕНТ</b> через пробел.\n<i>Пример: SALE 15</i>",
+      { parse_mode: "HTML" },
+    );
+  }
+
+  if (data === "promo_add_fixed") {
+    adminStates[chatId] = { action: "adding_fixed" };
+    bot.sendMessage(
+      chatId,
+      "Отправьте мне <b>КОД</b> и <b>СУММУ</b> (в рублях) через пробел.\n<i>Пример: MINUS 5000</i>",
+      { parse_mode: "HTML" },
+    );
+  }
+
+  if (data === "promo_delete") {
+    adminStates[chatId] = { action: "deleting" };
+    bot.sendMessage(
+      chatId,
+      "Отправьте название промокода, который нужно удалить:",
+    );
+  }
+});
+
+// --- Обработка текстового ввода бота ---
+bot.on("message", (msg) => {
+  const chatId = msg.chat.id.toString();
+  const text = msg.text;
+  if (!adminIds.includes(chatId) || !text || text.startsWith("/")) return;
+
+  // Если нажали на постоянную кнопку внизу
+  if (text === "🎟 Управлять промокодами") {
+    delete adminStates[chatId]; // Сбрасываем другие действия, если были
+    const opts = {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "📋 Список промокодов", callback_data: "promo_list" }],
+          [
+            { text: "➕ Создать (%)", callback_data: "promo_add_percent" },
+            { text: "➕ Создать (₽)", callback_data: "promo_add_fixed" },
+          ],
+          [{ text: "❌ Удалить промокод", callback_data: "promo_delete" }],
+        ],
+      },
+    };
+    return bot.sendMessage(
+      chatId,
+      "🎛 <b>Панель управления ProStudy</b>\nВыберите действие:",
+      { parse_mode: "HTML", ...opts },
+    );
+  }
+
+  const state = adminStates[chatId];
+  if (!state) return;
+
+  if (state.action === "adding_percent" || state.action === "adding_fixed") {
+    const parts = text.split(" ");
+    if (parts.length !== 2 || isNaN(parts[1])) {
+      return bot.sendMessage(
+        chatId,
+        "⚠️ Неверный формат. Попробуйте еще раз (например: PROMO 20):",
+      );
+    }
+
+    const code = parts[0].toUpperCase();
+    const value = parseInt(parts[1]);
+    const type = state.action === "adding_percent" ? "percent" : "fixed";
+
+    if (db.promocodes.find((p) => p.code === code)) {
+      return bot.sendMessage(chatId, "⚠️ Такой промокод уже существует!");
+    }
+
+    db.promocodes.push({ code, type, value });
+    delete adminStates[chatId];
+    bot.sendMessage(
+      chatId,
+      `✅ Промокод <b>${code}</b> на скидку ${value}${type === "percent" ? "%" : " ₽"} успешно создан!`,
+      { parse_mode: "HTML" },
+    );
+  }
+
+  if (state.action === "deleting") {
+    const codeToDelete = text.toUpperCase();
+    const initialLength = db.promocodes.length;
+
+    db.promocodes = db.promocodes.filter((p) => p.code !== codeToDelete);
+    delete adminStates[chatId];
+
+    if (db.promocodes.length < initialLength) {
+      bot.sendMessage(chatId, `🗑 Промокод <b>${codeToDelete}</b> удален.`, {
+        parse_mode: "HTML",
+      });
+    } else {
+      bot.sendMessage(chatId, `⚠️ Промокод <b>${codeToDelete}</b> не найден.`, {
+        parse_mode: "HTML",
+      });
+    }
+  }
+});
+
+// --- API: Бесплатная консультация ---
+app.post("/api/consultation", (req, res) => {
+  const { name, telegram } = req.body;
+  const text = `🔥 <b>Новая заявка на консультацию!</b>\n\nИмя: ${name}\nTelegram: @${telegram.replace("@", "")}`;
+  notifyAdmins(text, { parse_mode: "HTML" });
+  res.json({ success: true });
+});
+
+// --- API: Проверка промокода ---
+app.post("/api/check-promo", (req, res) => {
+  const { promo } = req.body;
+  if (!promo) return res.json({ success: false });
+
+  const activePromo = db.promocodes.find((p) => p.code === promo.toUpperCase());
+  if (activePromo) {
+    res.json({
+      success: true,
+      type: activePromo.type,
+      value: activePromo.value,
+    });
+  } else {
+    res.json({ success: false, message: "Промокод не найден" });
+  }
+});
+
+// --- API: Создание платежа ---
+app.post("/api/checkout", (req, res) => {
+  const { name, contact, promo, serviceTitle, originalPrice } = req.body;
+
+  let finalPrice = originalPrice;
+  let isPromoValid = false;
+
+  if (promo) {
+    const activePromo = db.promocodes.find(
+      (p) => p.code === promo.toUpperCase(),
+    );
+    if (activePromo) {
+      if (activePromo.type === "percent") {
+        finalPrice = Math.round(originalPrice * (1 - activePromo.value / 100));
+      } else if (activePromo.type === "fixed") {
+        finalPrice = Math.max(1, originalPrice - activePromo.value);
+      }
+      isPromoValid = true;
+    }
+  }
+
+  const invId = db.orders.length + 1;
+  db.orders.push({
+    invId,
+    name,
+    contact,
+    serviceTitle,
+    price: finalPrice,
+    status: "pending",
+  });
+
+  const login = process.env.ROBOKASSA_LOGIN;
+  const pass1 = process.env.ROBOKASSA_PASS1;
+  const description = `Оплата услуги: ${serviceTitle}`;
+
+  const signature = md5(`${login}:${finalPrice}:${invId}:${pass1}`);
+
+  const paymentUrl = `https://auth.robokassa.ru/Merchant/Index.aspx?MerchantLogin=${login}&OutSum=${finalPrice}&InvId=${invId}&Description=${encodeURIComponent(description)}&SignatureValue=${signature}&IsTest=1`;
+
+  res.json({ success: true, url: paymentUrl, isPromoValid });
+});
+
+// --- API: Result URL ---
+app.post("/api/payment/result", (req, res) => {
+  const { OutSum, InvId, SignatureValue } = req.body;
+  const pass2 = process.env.ROBOKASSA_PASS2;
+
+  const mySignature = md5(`${OutSum}:${InvId}:${pass2}`).toUpperCase();
+
+  if (mySignature === (SignatureValue || "").toUpperCase()) {
+    const order = db.orders.find((o) => o.invId === parseInt(InvId));
+
+    if (order && order.status !== "paid") {
+      order.status = "paid";
+      const text = `💰 <b>УСПЕШНАЯ ОПЛАТА!</b>\n\nУслуга: ${order.serviceTitle}\nСумма: ${OutSum} руб.\nКлиент: ${order.name}\nКонтакт: ${order.contact}`;
+      notifyAdmins(text, { parse_mode: "HTML" });
+    }
+    res.send(`OK${InvId}`);
+  } else {
+    res.send("Bad sign");
+  }
+});
+
+app.listen(process.env.PORT, () =>
+  console.log(`Сервер запущен на порту ${process.env.PORT}`),
+);
