@@ -24,6 +24,28 @@ const db = {
   orders: [],
 };
 
+// --- Прайс-лист на бэкенде (эталон цен) ---
+const SERVICES_PRICES = {
+  "Полное сопровождение": 90000,
+  "Стратегия поступления": 19000,
+  "Разбор кейса": 2990,
+  "College List": 2990,
+  "Extracurricular Plan": 3490,
+  "Summer Programs": 4999,
+  "Personal Statement": 14900,
+  "Supplemental Essay": 3900,
+  "Activity List": 3999,
+  "Academic Resume": 1400,
+  "Письма-рекомендации": 1999,
+  "Сайт-резюме абитуриента": 4999,
+  "Сайт под ваш проект": 7980,
+  "Notion-дашборд": 4900,
+  "Аудит LinkedIn": 3900,
+  "Cold Email Mentorship": 4210,
+  "Waitlist Support": 4990,
+  "Financial Aid (CSS)": 1900,
+};
+
 const adminStates = {};
 
 const notifyAdmins = (text, options = {}) => {
@@ -207,9 +229,18 @@ app.post("/api/check-promo", (req, res) => {
 
 // --- API: Создание платежа ---
 app.post("/api/checkout", (req, res) => {
-  const { name, contact, promo, serviceTitle, originalPrice } = req.body;
+  // Мы больше НЕ берем originalPrice с фронтенда
+  const { name, contact, promo, serviceTitle } = req.body;
 
-  let finalPrice = originalPrice;
+  const realPrice = SERVICES_PRICES[serviceTitle];
+
+  if (!realPrice) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Услуга не найдена" });
+  }
+
+  let finalPrice = realPrice;
   let isPromoValid = false;
 
   if (promo) {
@@ -218,9 +249,9 @@ app.post("/api/checkout", (req, res) => {
     );
     if (activePromo) {
       if (activePromo.type === "percent") {
-        finalPrice = Math.round(originalPrice * (1 - activePromo.value / 100));
+        finalPrice = Math.round(realPrice * (1 - activePromo.value / 100));
       } else if (activePromo.type === "fixed") {
-        finalPrice = Math.max(1, originalPrice - activePromo.value);
+        finalPrice = Math.max(1, realPrice - activePromo.value);
       }
       isPromoValid = true;
     }
