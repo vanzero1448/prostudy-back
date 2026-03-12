@@ -239,7 +239,7 @@ app.post("/api/check-promo", (req, res) => {
   }
 });
 
-// --- API: Создание платежа (AnyPay) ---
+// --- API: Создание платежа (Enot.io) ---
 app.post("/api/checkout", (req, res) => {
   const { name, contact, promo, serviceTitle } = req.body;
   const realPrice = SERVICES_PRICES[serviceTitle];
@@ -277,60 +277,57 @@ app.post("/api/checkout", (req, res) => {
     status: "pending",
   });
 
-  const projectId = process.env.ANYPAY_PROJECT_ID;
-  const secretKey = process.env.ANYPAY_SECRET_KEY;
+  const shopId = process.env.ENOT_SHOP_ID; // ID магазина (merchant)
+  const secretKey1 = process.env.ENOT_SECRET_KEY_1; // Секретный пароль (Секретное слово 1)
   const currency = "RUB";
-  const description = `Оплата услуги: ${serviceTitle}`;
+  const comment = `Оплата услуги: ${serviceTitle}`;
 
-  // Генерация подписи для AnyPay
-  const signatureString = `${projectId}:${invId}:${finalPrice}:${currency}:${description}:${secretKey}`;
+  // Формула Enot: shop_id:amount:secret_word:order_id
+  const signatureString = `${shopId}:${finalPrice}:${secretKey1}:${invId}`;
   const signature = md5(signatureString);
 
-  // Ссылка на кассу
-  const paymentUrl = `https://anypay.io/merchant?merchant_id=${projectId}&pay_id=${invId}&amount=${finalPrice}&currency=${currency}&desc=${encodeURIComponent(description)}&sign=${signature}`;
+  // Ссылка на кассу Enot
+  const paymentUrl = `https://enot.io/pay?m=${shopId}&oa=${finalPrice}&o=${invId}&s=${signature}&c=${encodeURIComponent(comment)}`;
 
   res.json({ success: true, url: paymentUrl, isPromoValid });
 });
 
-// --- API: Result URL (Успешная оплата AnyPay) ---
+// --- API: Result URL (Успешная оплата Enot.io) ---
 app.post("/api/payment/result", (req, res) => {
-  const { merchant_id, amount, pay_id, status, sign } = req.body;
-  const secretKey = process.env.ANYPAY_SECRET_KEY;
+  // Enot присылает данные о транзакции
+  const { merchant, amount, intid, merchant_id, sign } = req.body;
+  const secretKey2 = process.env.ENOT_SECRET_KEY_2; // Секретный пароль для оповещений (Секретное слово 2)
 
-  // Проверка подписи от сервера AnyPay, чтобы избежать фейковых запросов
-  const mySignature = md5(`${merchant_id}:${amount}:${pay_id}:${secretKey}`);
+  // Формула оповещения Enot: md5(merchant:amount:secret_word_2:merchant_id)
+  const mySignature = md5(`${merchant}:${amount}:${secretKey2}:${merchant_id}`);
 
   if (mySignature === sign) {
-    if (status === "paid") {
-      const order = db.orders.find((o) => o.invId === parseInt(pay_id));
+    const order = db.orders.find((o) => o.invId === parseInt(merchant_id));
 
-      if (order && order.status !== "paid") {
-        order.status = "paid";
-        const text = `💰 <b>УСПЕШНАЯ ОПЛАТА!</b>\n\nУслуга: ${order.serviceTitle}\nСумма: ${amount} руб.\nКлиент: ${order.name}\nКонтакт: ${order.contact}`;
+    if (order && order.status !== "paid") {
+      order.status = "paid";
+      const text = `💰 <b>УСПЕШНАЯ ОПЛАТА (Enot)!</b>\n\nУслуга: ${order.serviceTitle}\nСумма: ${amount} руб.\nКлиент: ${order.name}\nКонтакт: ${order.contact}\nID Транзакции: ${intid}`;
 
-        let contactUrl = "";
-        const cleanContact = order.contact.trim();
+      let contactUrl = "";
+      const cleanContact = order.contact.trim();
 
-        if (cleanContact.includes("@") && cleanContact.includes(".")) {
-          contactUrl = `mailto:${cleanContact}`;
-        } else {
-          contactUrl = `https://t.me/${cleanContact.replace("@", "")}`;
-        }
-
-        const options = {
-          parse_mode: "HTML",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "💬 Написать клиенту", url: contactUrl }],
-            ],
-          },
-        };
-
-        notifyAdmins(text, options);
+      if (cleanContact.includes("@") && cleanContact.includes(".")) {
+        contactUrl = `mailto:${cleanContact}`;
+      } else {
+        contactUrl = `https://t.me/${cleanContact.replace("@", "")}`;
       }
+
+      const options = {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [[{ text: "💬 Написать клиенту", url: contactUrl }]],
+        },
+      };
+
+      notifyAdmins(text, options);
     }
-    // AnyPay всегда ждет ответ "OK", иначе будет бесконечно слать запросы
-    res.send("OK");
+    // Enot строго требует, чтобы в ответ сервер возвращал текст "YES"
+    res.send("YES");
   } else {
     // Если кто-то пытается подделать запрос
     res.status(400).send("Bad sign");
