@@ -206,12 +206,9 @@ bot.on("message", (msg) => {
 app.post("/api/consultation", (req, res) => {
   const { name, telegram } = req.body;
 
-  // Очищаем никнейм от лишних пробелов и символа @
   const cleanTg = telegram.replace("@", "").trim();
-
   const text = `🔥 <b>Новая заявка на консультацию!</b>\n\nИмя: ${name}\nTelegram: @${cleanTg}`;
 
-  // Формируем кнопку для быстрой связи
   const options = {
     parse_mode: "HTML",
     reply_markup: {
@@ -242,7 +239,7 @@ app.post("/api/check-promo", (req, res) => {
   }
 });
 
-// --- API: Создание платежа ---
+// --- API: Создание платежа (AnyPay) ---
 app.post("/api/checkout", (req, res) => {
   const { name, contact, promo, serviceTitle } = req.body;
   const realPrice = SERVICES_PRICES[serviceTitle];
@@ -280,59 +277,66 @@ app.post("/api/checkout", (req, res) => {
     status: "pending",
   });
 
-  const login = process.env.ROBOKASSA_LOGIN;
-  const pass1 = process.env.ROBOKASSA_PASS1;
+  const projectId = process.env.ANYPAY_PROJECT_ID;
+  const secretKey = process.env.ANYPAY_SECRET_KEY;
+  const currency = "RUB";
   const description = `Оплата услуги: ${serviceTitle}`;
 
-  const signature = md5(`${login}:${finalPrice}:${invId}:${pass1}`);
+  // Генерация подписи для AnyPay
+  const signatureString = `${projectId}:${invId}:${finalPrice}:${currency}:${description}:${secretKey}`;
+  const signature = md5(signatureString);
 
-  const paymentUrl = `https://auth.robokassa.ru/Merchant/Index.aspx?MerchantLogin=${login}&OutSum=${finalPrice}&InvId=${invId}&Description=${encodeURIComponent(description)}&SignatureValue=${signature}&IsTest=1`;
+  // Ссылка на кассу
+  const paymentUrl = `https://anypay.io/merchant?merchant_id=${projectId}&pay_id=${invId}&amount=${finalPrice}&currency=${currency}&desc=${encodeURIComponent(description)}&sign=${signature}`;
 
   res.json({ success: true, url: paymentUrl, isPromoValid });
 });
 
-// --- API: Result URL (Успешная оплата) ---
+// --- API: Result URL (Успешная оплата AnyPay) ---
 app.post("/api/payment/result", (req, res) => {
-  const { OutSum, InvId, SignatureValue } = req.body;
-  const pass2 = process.env.ROBOKASSA_PASS2;
+  const { merchant_id, amount, pay_id, status, sign } = req.body;
+  const secretKey = process.env.ANYPAY_SECRET_KEY;
 
-  const mySignature = md5(`${OutSum}:${InvId}:${pass2}`).toUpperCase();
+  // Проверка подписи от сервера AnyPay, чтобы избежать фейковых запросов
+  const mySignature = md5(`${merchant_id}:${amount}:${pay_id}:${secretKey}`);
 
-  if (mySignature === (SignatureValue || "").toUpperCase()) {
-    const order = db.orders.find((o) => o.invId === parseInt(InvId));
+  if (mySignature === sign) {
+    if (status === "paid") {
+      const order = db.orders.find((o) => o.invId === parseInt(pay_id));
 
-    if (order && order.status !== "paid") {
-      order.status = "paid";
-      const text = `💰 <b>УСПЕШНАЯ ОПЛАТА!</b>\n\nУслуга: ${order.serviceTitle}\nСумма: ${OutSum} руб.\nКлиент: ${order.name}\nКонтакт: ${order.contact}`;
+      if (order && order.status !== "paid") {
+        order.status = "paid";
+        const text = `💰 <b>УСПЕШНАЯ ОПЛАТА!</b>\n\nУслуга: ${order.serviceTitle}\nСумма: ${amount} руб.\nКлиент: ${order.name}\nКонтакт: ${order.contact}`;
 
-      // Определяем, что оставил клиент: Email или Telegram
-      let contactUrl = "";
-      const cleanContact = order.contact.trim();
+        let contactUrl = "";
+        const cleanContact = order.contact.trim();
 
-      if (cleanContact.includes("@") && cleanContact.includes(".")) {
-        // Если есть @ и точка - скорее всего это email
-        contactUrl = `mailto:${cleanContact}`;
-      } else {
-        // Иначе это ник в телеграме
-        contactUrl = `https://t.me/${cleanContact.replace("@", "")}`;
+        if (cleanContact.includes("@") && cleanContact.includes(".")) {
+          contactUrl = `mailto:${cleanContact}`;
+        } else {
+          contactUrl = `https://t.me/${cleanContact.replace("@", "")}`;
+        }
+
+        const options = {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "💬 Написать клиенту", url: contactUrl }],
+            ],
+          },
+        };
+
+        notifyAdmins(text, options);
       }
-
-      // Добавляем кнопку
-      const options = {
-        parse_mode: "HTML",
-        reply_markup: {
-          inline_keyboard: [[{ text: "💬 Написать клиенту", url: contactUrl }]],
-        },
-      };
-
-      notifyAdmins(text, options);
     }
-    res.send(`OK${InvId}`);
+    // AnyPay всегда ждет ответ "OK", иначе будет бесконечно слать запросы
+    res.send("OK");
   } else {
-    res.send("Bad sign");
+    // Если кто-то пытается подделать запрос
+    res.status(400).send("Bad sign");
   }
 });
 
-app.listen(process.env.PORT, () =>
-  console.log(`Сервер запущен на порту ${process.env.PORT}`),
+app.listen(process.env.PORT || 3000, () =>
+  console.log(`Сервер запущен на порту ${process.env.PORT || 3000}`),
 );
